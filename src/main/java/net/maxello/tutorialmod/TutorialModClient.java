@@ -118,22 +118,27 @@ public class TutorialModClient implements ClientModInitializer {
             return new SkillTier(Skill.FARMING, tier);
         }
 
-        // You can later add melee/ranged combat here if you hook into attack events,
-        // or recipes for WEAPONSMITHING / TOOLSMITHING / ARMOURING.
+        // Later we can add: melee/ranged combat, crafting skills, etc.
 
         return null; // Not a skill/tier we track with block breaks
     }
 
     /**
-     * Very simple way to read tier from item name.
-     * Works fine for vanilla tools/armour, can be refined later.
+     * Read tier from item ID.
+     * Works for vanilla tools/armour and your server’s “copper = golden” setup.
      */
     private static Tier getToolTier(ItemStack held) {
         String id = held.getItem().toString().toLowerCase();
 
         if (id.contains("wooden"))    return Tier.WOOD;
         if (id.contains("stone"))     return Tier.STONE;
+
+        // Server uses golden tools as "copper" tools (retextured)
+        if (id.contains("golden"))    return Tier.COPPER;
+
+        // If they ever add real copper_* items
         if (id.contains("copper"))    return Tier.COPPER;
+
         if (id.contains("iron"))      return Tier.IRON;
         if (id.contains("diamond"))   return Tier.DIAMOND;
 
@@ -202,7 +207,7 @@ public class TutorialModClient implements ClientModInitializer {
     }
 
     private static String formatSkillTier(SkillTier st) {
-        // e.g. "FORESTRY (IRON)" – you can prettify this later
+        // e.g. "FORESTRY (COPPER)" – can prettify later if you like
         return st.skill().name() + " (" + st.tier().name() + ")";
     }
 }
