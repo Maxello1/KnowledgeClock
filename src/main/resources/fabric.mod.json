@@ -1,40 +1,38 @@
 {
-	"schemaVersion": 1,
-	"id": "tutorialmod",
-	"version": "${version}",
-	"name": "Tutorial Mod",
-	"description": "This is atimer for spifftopia xp tracking made by Maxello",
-	"authors": [
-		"Maxello"
-	],
-	"contact": {
-		"homepage": "https://fabricmc.net/",
-		"sources": "https://github.com/FabricMC/fabric-example-mod"
-	},
-	"license": "MIT",
-	"icon": "assets/tutorialmod/icon.png",
-	"environment": "*",
-	"entrypoints": {
-		"main": [
-			"net.maxello.tutorialmod.TutorialMod"
-		],
-      "client": [
-        "net.maxello.tutorialmod.TutorialModClient"
-      ],
-		"fabric-datagen": [
-			"net.maxello.tutorialmod.TutorialModDataGenerator"
-		]
-	},
-	"mixins": [
-		"tutorialmod.mixins.json"
-	],
-	"depends": {
-		"fabricloader": ">=0.17.3",
-		"minecraft": "~1.20.4",
-		"java": ">=17",
-		"fabric-api": "*"
-	},
-	"suggests": {
-		"another-mod": "*"
-	}
+  "schemaVersion": 1,
+  "id": "xptimer",
+  "version": "1.1.0",
+
+  "name": "XP Timer",
+  "description": "Client-side XP cooldown timer for Spifftopia, made by Maxello.",
+  "authors": [
+    "Maxello"
+  ],
+
+  "license": "MIT",
+
+  "environment": "client",
+
+  "entrypoints": {
+    "main": [
+      "net.maxello.tutorialmod.TutorialMod"
+    ],
+    "client": [
+      "net.maxello.tutorialmod.TutorialModClient"
+    ],
+    "fabric-datagen": [
+      "net.maxello.tutorialmod.TutorialModDataGenerator"
+    ]
+  },
+
+  "mixins": [
+    "tutorialmod.mixins.json"
+  ],
+
+  "depends": {
+    "fabricloader": ">=0.17.3",
+    "minecraft": "~1.20.4",
+    "java": ">=17",
+    "fabric-api": "*"
+  }
 }

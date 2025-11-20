@@ -13,10 +13,15 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
-import net.minecraft.item.*;
+import net.minecraft.item.AxeItem;
+import net.minecraft.item.BowItem;
+import net.minecraft.item.CrossbowItem;
+import net.minecraft.item.ItemStack;
+import net.minecraft.item.SwordItem;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.sound.SoundEvents;
+import net.minecraft.text.Text;
 import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
@@ -24,46 +29,41 @@ import net.minecraft.util.math.Vec3d;
 
 import java.util.HashMap;
 import java.util.Map;
+import java.util.List;
+import java.util.ArrayList;
+import java.util.Iterator;
 
 public class TutorialModClient implements ClientModInitializer {
 
-    // 60 seconds cooldown per key, in ms
+    // 60 seconds per skill/tool
     private static final long COOLDOWN_MS = 60_000L;
 
-    // Max range for ranged "aim" checks (in blocks)
-    private static final double MAX_RANGED_DISTANCE = 50.0D;
-
-    // Max angle from look direction (in degrees) to still count as "aimed at"
+    // Bow / crossbow detection
+    private static final double MAX_RANGED_DISTANCE = 20.0D;
     private static final double MAX_RANGED_ANGLE_DEGREES = 12.0D;
 
-    // Track last attack / use key state
+    // Toasts
+    private static final long TOAST_DURATION_MS = 2500L;
+
     private static boolean lastAttackPressed = false;
     private static boolean lastUsePressed = false;
 
-    // Bow draw tracking
     private static boolean wasUsingBow = false;
     private static long bowUseStartTick = 0L;
 
-    // Crossbow: track "first click" vs "second click"
     private static boolean crossbowPrimed = false;
 
-    // Tick counter to measure durations
     private static long tickCounter = 0L;
 
-    // All skills the server tracks knowledge for
     private enum Skill {
         MELEE_COMBAT,
         DIGGING,
         FORESTRY,
         FARMING,
         MINING,
-        RANGED_COMBAT,
-        ARMOURING,
-        WEAPONSMITHING,
-        TOOLSMITHING
+        RANGED_COMBAT
     }
 
-    // Generic tiers
     private enum Tier {
         WOOD,
         STONE,
@@ -74,13 +74,14 @@ public class TutorialModClient implements ClientModInitializer {
         CHAINMAIL
     }
 
-    // One cooldown entry = one Skill + one Tier + (optional) tool group ("bow", "crossbow")
-    private record SkillKey(Skill skill, Tier tier, String toolGroup) {}
+    // Includes the icon stack used for HUD/toast
+    private record SkillKey(Skill skill, Tier tier, String toolGroup, ItemStack iconStack) {}
 
-    // When each key is ready again (system millis)
+    private record SkillToast(SkillKey key, long startTimeMs) {}
+
     private static final Map<SkillKey, Long> cooldownEnd = new HashMap<>();
-    // To only play the "ready" sound once
     private static final Map<SkillKey, Boolean> soundPlayed = new HashMap<>();
+    private static final List<SkillToast> activeToasts = new ArrayList<>();
 
     @Override
     public void onInitializeClient() {
@@ -106,7 +107,7 @@ public class TutorialModClient implements ClientModInitializer {
         startCooldown(key);
     }
 
-    /* ================== MELEE & RANGED VIA TICK ================== */
+    /* ================== TICK LOGIC ================== */
 
     private void registerTickListener() {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
@@ -115,35 +116,42 @@ public class TutorialModClient implements ClientModInitializer {
             tickCounter++;
             long now = System.currentTimeMillis();
 
-            // --- 1) Handle cooldown expiry + sounds ---
+            // Handle cooldown expiry + sound + toast
             for (var entry : cooldownEnd.entrySet()) {
                 SkillKey key = entry.getKey();
                 long end = entry.getValue();
 
                 if (end <= now && !soundPlayed.getOrDefault(key, false)) {
+                    // Play a small "ready" sound
                     client.player.playSound(SoundEvents.UI_BUTTON_CLICK.value(), 1.0f, 1.0f);
+
+                    // Show custom toast popup
+                    showReadyToast(client, key);
+
                     soundPlayed.put(key, true);
                 }
             }
 
-            // --- 2) Melee: attack key edge ---
+            // Melee attack edge
             boolean attackNow = client.options.attackKey.isPressed();
             if (attackNow && !lastAttackPressed) {
                 handleMeleeAttack(client);
             }
             lastAttackPressed = attackNow;
 
-            // --- 3) Crossbow: use key edge ---
+            // Crossbow two-click
             boolean useNow = client.options.useKey.isPressed();
             if (useNow && !lastUsePressed) {
                 handleUseKeyPressed(client);
             }
             lastUsePressed = useNow;
 
-            // --- 4) Bow: detect draw + release ---
+            // Bow draw + release
             handleBowUsageTick(client);
         });
     }
+
+    /* ================== MELEE ================== */
 
     private static void handleMeleeAttack(MinecraftClient client) {
         if (client.player == null) return;
@@ -164,35 +172,27 @@ public class TutorialModClient implements ClientModInitializer {
         Entity target = ehr.getEntity();
         if (!(target instanceof LivingEntity)) return;
 
-        SkillKey key = new SkillKey(Skill.MELEE_COMBAT, tier, null);
-        startCooldown(key);
+        startCooldown(new SkillKey(Skill.MELEE_COMBAT, tier, null, held.copy()));
     }
 
-    /**
-     * Called on right-click edge.
-     * We implement simple "two-click" logic for crossbows:
-     *  - First right-click with crossbow: start charging (we just mark primed, ignore)
-     *  - Second right-click with crossbow while aiming at mob (within cone/range): treat as shot → start timer
-     */
+    /* ================== CROSSBOW TWO-CLICK SYSTEM ================== */
+
     private static void handleUseKeyPressed(MinecraftClient client) {
         if (client.player == null) return;
-
         ItemStack held = client.player.getMainHandStack();
 
-        // Only care about crossbows here
         if (!(held.getItem() instanceof CrossbowItem)) {
-            // If they're not even holding a crossbow, clear primed flag
             crossbowPrimed = false;
             return;
         }
 
-        // No previous click → this is the "start charging" click, just prime and ignore
+        // First click = charge
         if (!crossbowPrimed) {
             crossbowPrimed = true;
             return;
         }
 
-        // If we get here: crossbowPrimed == true → treat this as the "shot" click
+        // Second click = shot (if aimed at something)
         LivingEntity target = getAimedLivingEntity(client, MAX_RANGED_DISTANCE, MAX_RANGED_ANGLE_DEGREES);
         if (target == null) {
             crossbowPrimed = false;
@@ -201,18 +201,14 @@ public class TutorialModClient implements ClientModInitializer {
 
         Tier tier = getToolTier(held);
         if (tier != null) {
-            SkillKey key = new SkillKey(Skill.RANGED_COMBAT, tier, "crossbow");
-            startCooldown(key);
+            startCooldown(new SkillKey(Skill.RANGED_COMBAT, tier, "crossbow", held.copy()));
         }
 
-        // We consumed the primed state for this shot
         crossbowPrimed = false;
     }
 
-    /**
-     * Track when a bow is being drawn and released.
-     * Approx shot moment = "player stopped using bow after holding for a while".
-     */
+    /* ================== BOW DRAW + RELEASE ================== */
+
     private static void handleBowUsageTick(MinecraftClient client) {
         if (client.player == null) {
             wasUsingBow = false;
@@ -222,16 +218,14 @@ public class TutorialModClient implements ClientModInitializer {
         ItemStack active = client.player.getActiveItem();
         boolean isUsingBowNow = !active.isEmpty() && active.getItem() instanceof BowItem;
 
-        // Just started drawing the bow
+        // Started drawing
         if (!wasUsingBow && isUsingBowNow) {
             bowUseStartTick = tickCounter;
         }
 
-        // Just released the bow
+        // Released
         if (wasUsingBow && !isUsingBowNow) {
             long usedTicks = tickCounter - bowUseStartTick;
-
-            // Only treat as a "shot" if drawn for at least a few ticks
             if (usedTicks >= 5) {
                 handleBowShot(client);
             }
@@ -252,11 +246,10 @@ public class TutorialModClient implements ClientModInitializer {
         LivingEntity target = getAimedLivingEntity(client, MAX_RANGED_DISTANCE, MAX_RANGED_ANGLE_DEGREES);
         if (target == null) return;
 
-        SkillKey key = new SkillKey(Skill.RANGED_COMBAT, tier, "bow");
-        startCooldown(key);
+        startCooldown(new SkillKey(Skill.RANGED_COMBAT, tier, "bow", held.copy()));
     }
 
-    /* ================== COOLDOWN HANDLING ================== */
+    /* ================== COOLDOWNS ================== */
 
     private static void startCooldown(SkillKey key) {
         long now = System.currentTimeMillis();
@@ -268,7 +261,7 @@ public class TutorialModClient implements ClientModInitializer {
         }
     }
 
-    /* ================== BLOCK → SKILL LOGIC ================== */
+    /* ================== BLOCK → SKILL ================== */
 
     private static SkillKey detectSkillKeyFromBlock(ItemStack held, BlockState state) {
         if (held.isEmpty()) return null;
@@ -276,62 +269,46 @@ public class TutorialModClient implements ClientModInitializer {
         Tier tier = getToolTier(held);
         if (tier == null) return null;
 
-        // Forestry: logs + axe
         if (held.isIn(ItemTags.AXES) && state.isIn(BlockTags.LOGS)) {
-            return new SkillKey(Skill.FORESTRY, tier, null);
+            return new SkillKey(Skill.FORESTRY, tier, null, held.copy());
         }
 
-        // Mining: anything mineable with pickaxe (stone/ores/metal blocks etc.)
         if (held.isIn(ItemTags.PICKAXES) && state.isIn(BlockTags.PICKAXE_MINEABLE)) {
-            return new SkillKey(Skill.MINING, tier, null);
+            return new SkillKey(Skill.MINING, tier, null, held.copy());
         }
 
-        // Digging: shovel blocks (dirt, sand, gravel, etc.)
         if (held.isIn(ItemTags.SHOVELS) && state.isIn(BlockTags.SHOVEL_MINEABLE)) {
-            return new SkillKey(Skill.DIGGING, tier, null);
+            return new SkillKey(Skill.DIGGING, tier, null, held.copy());
         }
 
-        // Farming: breaking crops while holding a hoe
         if (held.isIn(ItemTags.HOES) && state.getBlock() instanceof CropBlock) {
-            return new SkillKey(Skill.FARMING, tier, null);
+            return new SkillKey(Skill.FARMING, tier, null, held.copy());
         }
 
         return null;
     }
 
-    /* ================== ITEM → TIER LOGIC ================== */
+    /* ================== ITEM → TIER ================== */
 
     private static Tier getToolTier(ItemStack held) {
         String id = held.getItem().toString().toLowerCase();
 
         if (id.contains("wooden"))    return Tier.WOOD;
         if (id.contains("stone"))     return Tier.STONE;
-
-        // Server uses golden tools as "copper" tools (retextured)
-        if (id.contains("golden"))    return Tier.COPPER;
-        if (id.contains("copper"))    return Tier.COPPER;
-
+        if (id.contains("golden") || id.contains("copper")) return Tier.COPPER;
         if (id.contains("iron"))      return Tier.IRON;
         if (id.contains("diamond"))   return Tier.DIAMOND;
-
         if (id.contains("leather"))   return Tier.LEATHER;
         if (id.contains("chainmail")) return Tier.CHAINMAIL;
 
-        // Bows / crossbows / modded ranged weapons → treat as WOOD tier by default
-        if (id.contains("bow") || id.contains("crossbow")) {
+        if (id.contains("bow") || id.contains("crossbow"))
             return Tier.WOOD;
-        }
 
         return null;
     }
 
-    /* ================== LONG-DISTANCE "AIM CONE" ENTITY DETECTION ================== */
+    /* ================== AIM-CONE ENTITY PICK ================== */
 
-    /**
-     * Returns the living entity roughly in the player's aim direction, within a certain
-     * max distance and angle cone. This lets you aim slightly above a mob (for arrow drop)
-     * and still have it count.
-     */
     private static LivingEntity getAimedLivingEntity(MinecraftClient client, double maxDistance, double maxAngleDeg) {
         if (client.player == null || client.world == null) return null;
 
@@ -339,25 +316,24 @@ public class TutorialModClient implements ClientModInitializer {
         Vec3d lookDir = client.player.getRotationVec(1.0f).normalize();
 
         double maxAngleRad = Math.toRadians(maxAngleDeg);
-        double minDot = Math.cos(maxAngleRad); // dot product threshold
+        double minDot = Math.cos(maxAngleRad);
 
         Box searchBox = client.player.getBoundingBox().expand(maxDistance);
         LivingEntity best = null;
         double bestDistance = Double.MAX_VALUE;
 
-        for (Entity e : client.world.getOtherEntities(client.player, searchBox, entity ->
-                entity instanceof LivingEntity && !entity.isSpectator() && entity.isAlive()
-        )) {
+        for (Entity e : client.world.getOtherEntities(client.player, searchBox,
+                entity -> entity instanceof LivingEntity && entity.isAlive())) {
+
             LivingEntity le = (LivingEntity) e;
             Vec3d toEntity = le.getBoundingBox().getCenter().subtract(eyePos);
+
             double dist = toEntity.length();
             if (dist < 0.1 || dist > maxDistance) continue;
 
             Vec3d dirToEntity = toEntity.normalize();
-            double dot = lookDir.dotProduct(dirToEntity);
-            if (dot < minDot) continue; // outside the cone
+            if (lookDir.dotProduct(dirToEntity) < minDot) continue;
 
-            // Prefer the closest valid entity in the cone
             if (dist < bestDistance) {
                 bestDistance = dist;
                 best = le;
@@ -365,6 +341,13 @@ public class TutorialModClient implements ClientModInitializer {
         }
 
         return best;
+    }
+
+    /* ================== CUSTOM TOAST HANDLING ================== */
+
+    private static void showReadyToast(MinecraftClient client, SkillKey key) {
+        // Just add to our list; drawn in HUD callback
+        activeToasts.add(new SkillToast(key, System.currentTimeMillis()));
     }
 
     /* ================== HUD OVERLAY ================== */
@@ -375,34 +358,74 @@ public class TutorialModClient implements ClientModInitializer {
             if (client.player == null) return;
 
             long now = System.currentTimeMillis();
+
+            // --- LEFT SIDE: ACTIVE COOLDOWNS AS ICON + "Xs" ---
             int x = 10;
             int y = 10;
+            int iconSize = 16;
+            int padding = 4;
 
             for (var entry : cooldownEnd.entrySet()) {
                 SkillKey key = entry.getKey();
                 long end = entry.getValue();
                 long remainingMs = end - now;
 
-                String text;
-                int color;
+                if (remainingMs <= 0) continue;
 
-                if (remainingMs <= 0) {
-                    text = formatSkillKey(key) + ": READY";
-                    color = 0x00FF00;
-                } else {
-                    long seconds = (remainingMs + 999) / 1000;
-                    text = formatSkillKey(key) + ": " + seconds + "s";
-                    color = 0xFFFFFF;
+                long seconds = (remainingMs + 999) / 1000;
+
+                context.drawItem(key.iconStack(), x, y);
+
+                String text = seconds + "s";
+                context.drawText(client.textRenderer, text, x + iconSize + 3, y + 4, 0xFFFFFF, true);
+
+                y += iconSize + padding;
+            }
+
+            // --- TOP-RIGHT: CUSTOM "TOAST" POPUPS FOR READY SKILLS ---
+            int screenWidth = client.getWindow().getScaledWidth();
+            int toastWidth = 150;
+            int toastHeight = 24;
+            int baseX = screenWidth - toastWidth - 10;
+            int baseY = 10;
+
+            Iterator<SkillToast> it = activeToasts.iterator();
+            int index = 0;
+
+            while (it.hasNext()) {
+                SkillToast toast = it.next();
+                long age = now - toast.startTimeMs();
+                if (age > TOAST_DURATION_MS) {
+                    it.remove();
+                    continue;
                 }
 
-                context.drawText(client.textRenderer, text, x, y, color, true);
-                y += 10;
+                int tx = baseX;
+                int ty = baseY + index * (toastHeight + 4);
+
+                // Simple background
+                context.fill(tx, ty, tx + toastWidth, ty + toastHeight, 0xCC000000); // semi-transparent black
+
+                // Border (optional)
+                context.fill(tx, ty, tx + toastWidth, ty + 1, 0xFFFFFFFF);
+                context.fill(tx, ty + toastHeight - 1, tx + toastWidth, ty + toastHeight, 0xFFFFFFFF);
+                context.fill(tx, ty, tx + 1, ty + toastHeight, 0xFFFFFFFF);
+                context.fill(tx + toastWidth - 1, ty, tx + toastWidth, ty + toastHeight, 0xFFFFFFFF);
+
+                // Tool icon
+                context.drawItem(toast.key().iconStack(), tx + 4, ty + 4);
+
+                String skillName = toast.key().skill().name().replace("_", " ");
+                String tierName = toast.key().tier().name().toLowerCase();
+
+                Text title = Text.literal(skillName + " READY");
+                Text subtitle = Text.literal("(" + tierName + ")");
+
+                context.drawText(client.textRenderer, title, tx + 24, ty + 5, 0xFFFFFF, false);
+                context.drawText(client.textRenderer, subtitle, tx + 24, ty + 14, 0xAAAAAA, false);
+
+                index++;
             }
         });
-    }
-
-    private static String formatSkillKey(SkillKey key) {
-        String tool = key.toolGroup() == null ? "" : " " + key.toolGroup().toUpperCase();
-        return key.skill().name() + tool + " (" + key.tier().name() + ")";
     }
 }
