@@ -1,4 +1,5 @@
 package net.maxello.tutorialmod;
+
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
@@ -10,11 +11,14 @@ import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.world.ClientWorld;
-import net.minecraft.item.ItemStack;
+import net.minecraft.entity.Entity;
+import net.minecraft.entity.LivingEntity;
+import net.minecraft.item.*;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.hit.EntityHitResult;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -23,6 +27,14 @@ public class TutorialModClient implements ClientModInitializer {
 
     // 60 seconds cooldown per skill+tier, in ms
     private static final long COOLDOWN_MS = 60_000L;
+
+    // Track last attack key state (for melee)
+    private static boolean lastAttackPressed = false;
+
+    // Track ranged-weapon usage to approximate arrow shot moment
+    private static boolean wasUsingRanged = false;
+    private static long rangedUseStartTick = 0L;
+    private static long tickCounter = 0L;
 
     // All skills the server tracks knowledge for
     private enum Skill {
@@ -78,20 +90,144 @@ public class TutorialModClient implements ClientModInitializer {
         SkillTier skillTier = detectSkillTier(held, state);
         if (skillTier == null) return;
 
-        long now = System.currentTimeMillis();
+        startCooldown(skillTier);
+    }
 
-        // Only start a new cooldown if there is none yet or it has expired.
-        Long existingEnd = cooldownEnd.get(skillTier);
-        if (existingEnd == null || existingEnd <= now) {
-            cooldownEnd.put(skillTier, now + COOLDOWN_MS);
-            soundPlayed.put(skillTier, false);
-        }
+    /* ================== MELEE & RANGED VIA TICK ================== */
+
+    private void registerTickListener() {
+        ClientTickEvents.END_CLIENT_TICK.register(client -> {
+            if (client.player == null) return;
+
+            tickCounter++;
+            long now = System.currentTimeMillis();
+
+            // --- 1) Handle cooldown expiry + sounds ---
+            for (var entry : cooldownEnd.entrySet()) {
+                SkillTier key = entry.getKey();
+                long end = entry.getValue();
+
+                if (end <= now && !soundPlayed.getOrDefault(key, false)) {
+                    client.player.playSound(SoundEvents.UI_BUTTON_CLICK.value(), 1.0f, 1.0f);
+                    soundPlayed.put(key, true);
+                }
+            }
+
+            // --- 2) Detect melee attack (left click edge) ---
+            boolean attackNow = client.options.attackKey.isPressed();
+            if (attackNow && !lastAttackPressed) {
+                handleMeleeAttack(client);
+            }
+            lastAttackPressed = attackNow;
+
+            // --- 3) Track ranged weapon usage to detect "shot" on release ---
+            handleRangedUsageTick(client);
+        });
+    }
+
+    private static void handleMeleeAttack(MinecraftClient client) {
+        if (client.player == null) return;
+
+        ItemStack held = client.player.getMainHandStack();
+        Tier tier = getToolTier(held);
+        if (tier == null) return;
+
+        // What counts as melee weapon
+        boolean isMelee =
+                held.isIn(ItemTags.SWORDS) ||
+                        held.isIn(ItemTags.AXES) ||
+                        held.getItem() instanceof SwordItem ||
+                        held.getItem() instanceof AxeItem;
+
+        if (!isMelee) return;
+
+        // Only if our crosshair is actually on an entity
+        if (!(client.crosshairTarget instanceof EntityHitResult ehr)) return;
+        Entity target = ehr.getEntity();
+        if (!(target instanceof LivingEntity)) return; // only living things give melee XP
+
+        SkillTier st = new SkillTier(Skill.MELEE_COMBAT, tier);
+        startCooldown(st);
     }
 
     /**
-     * Map a block break (held item + block) to a (Skill, Tier) pair.
-     * This is where we match your server's knowledge categories.
+     * Track when a bow/crossbow is being drawn and released.
+     * We approximate the arrow shot as: "player stopped using a ranged weapon after
+     * holding it for at least a few ticks".
      */
+    private static void handleRangedUsageTick(MinecraftClient client) {
+        if (client.player == null) {
+            wasUsingRanged = false;
+            return;
+        }
+
+        // Is the player currently using a ranged weapon (bow/crossbow/etc.)?
+        ItemStack active = client.player.getActiveItem();
+        boolean isUsingRangedNow = !active.isEmpty() &&
+                (active.getItem() instanceof BowItem ||
+                        active.getItem() instanceof CrossbowItem ||
+                        active.getItem() instanceof RangedWeaponItem);
+
+        // Just started drawing the bow/crossbow
+        if (!wasUsingRanged && isUsingRangedNow) {
+            rangedUseStartTick = tickCounter;
+        }
+
+        // Just released the bow/crossbow
+        if (wasUsingRanged && !isUsingRangedNow) {
+            long usedTicks = tickCounter - rangedUseStartTick;
+
+            // Only treat as a "shot" if drawn for at least a short time
+            if (usedTicks >= 5) { // ~5 ticks threshold, tweak if needed
+                handleRangedShot(client);
+            }
+        }
+
+        wasUsingRanged = isUsingRangedNow;
+    }
+
+    /**
+     * Called when we think an arrow/bolt has actually been fired.
+     * Requires: holding a ranged weapon, decent draw time, and crosshair on a living entity.
+     */
+    private static void handleRangedShot(MinecraftClient client) {
+        if (client.player == null) return;
+
+        ItemStack held = client.player.getMainHandStack();
+        Tier tier = getToolTier(held);
+        if (tier == null) return;
+
+        boolean isRanged =
+                held.getItem() instanceof BowItem ||
+                        held.getItem() instanceof CrossbowItem ||
+                        held.getItem() instanceof RangedWeaponItem;
+
+        if (!isRanged) return;
+
+        // Only start timer if we are actually aiming at a living entity when the shot is released
+        if (!(client.crosshairTarget instanceof EntityHitResult ehr)) return;
+        Entity target = ehr.getEntity();
+        if (!(target instanceof LivingEntity)) return;
+
+        SkillTier st = new SkillTier(Skill.RANGED_COMBAT, tier);
+        startCooldown(st);
+    }
+
+    /* ================== COOLDOWN HANDLING ================== */
+
+    private static void startCooldown(SkillTier st) {
+        long now = System.currentTimeMillis();
+        Long existingEnd = cooldownEnd.get(st);
+
+        // Only start a new cooldown if there is none yet or it has expired.
+        if (existingEnd == null || existingEnd <= now) {
+            cooldownEnd.put(st, now + COOLDOWN_MS);
+            soundPlayed.put(st, false);
+        }
+    }
+
+    /* ================== BLOCK → SKILL LOGIC ================== */
+
     private static SkillTier detectSkillTier(ItemStack held, BlockState state) {
         if (held.isEmpty()) return null;
 
@@ -118,25 +254,20 @@ public class TutorialModClient implements ClientModInitializer {
             return new SkillTier(Skill.FARMING, tier);
         }
 
-        // Later we can add: melee/ranged combat, crafting skills, etc.
-
         return null; // Not a skill/tier we track with block breaks
     }
 
-    /**
-     * Read tier from item ID.
-     * Works for vanilla tools/armour and your server’s “copper = golden” setup.
-     */
+    /* ================== ITEM → TIER LOGIC ================== */
+
     private static Tier getToolTier(ItemStack held) {
         String id = held.getItem().toString().toLowerCase();
 
+        // Tool / armor tiers
         if (id.contains("wooden"))    return Tier.WOOD;
         if (id.contains("stone"))     return Tier.STONE;
 
         // Server uses golden tools as "copper" tools (retextured)
         if (id.contains("golden"))    return Tier.COPPER;
-
-        // If they ever add real copper_* items
         if (id.contains("copper"))    return Tier.COPPER;
 
         if (id.contains("iron"))      return Tier.IRON;
@@ -145,30 +276,14 @@ public class TutorialModClient implements ClientModInitializer {
         if (id.contains("leather"))   return Tier.LEATHER;
         if (id.contains("chainmail")) return Tier.CHAINMAIL;
 
+        // Ranged-only items: bow / crossbow / custom bows
+        // If they don't encode tier in the ID, treat as WOOD by default.
+        if (id.contains("bow") || id.contains("crossbow")) {
+            return Tier.WOOD;
+        }
+
         // If nothing matches, we don't know the tier
         return null;
-    }
-
-    /* ================== TICK LISTENER (SOUND) ================== */
-
-    private void registerTickListener() {
-        ClientTickEvents.END_CLIENT_TICK.register(client -> {
-            if (client.player == null) return;
-
-            long now = System.currentTimeMillis();
-
-            for (var entry : cooldownEnd.entrySet()) {
-                SkillTier key = entry.getKey();
-                long end = entry.getValue();
-
-                long remainingMs = end - now;
-                if (remainingMs <= 0 && !soundPlayed.getOrDefault(key, false)) {
-                    // Cooldown finished → play "ready" sound once (optional)
-                    client.player.playSound(SoundEvents.UI_BUTTON_CLICK.value(), 1.0f, 1.0f);
-                    soundPlayed.put(key, true);
-                }
-            }
-        });
     }
 
     /* ================== HUD OVERLAY ================== */
