@@ -5,6 +5,7 @@ import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.fabric.api.event.client.player.ClientPlayerBlockBreakEvents;
 
 import net.minecraft.block.BlockState;
+import net.minecraft.block.CropBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.network.ClientPlayerEntity;
@@ -15,36 +16,55 @@ import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.util.math.BlockPos;
 
-import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.Map;
 
 public class TutorialModClient implements ClientModInitializer {
 
-    // 60 seconds
+    // 60 seconds cooldown per skill+tier, in ms
     private static final long COOLDOWN_MS = 60_000L;
 
-    /** Categories that match your server’s XP actions */
-    private enum XpCategory {
-        LOGS_AXE,
-        STONE_PICKAXE
-        // You can easily add more later
+    // All skills the server tracks knowledge for
+    private enum Skill {
+        MELEE_COMBAT,
+        DIGGING,
+        FORESTRY,
+        FARMING,
+        MINING,
+        RANGED_COMBAT,
+        ARMOURING,
+        WEAPONSMITHING,
+        TOOLSMITHING
     }
 
-    /** When each category is ready again (system millis). */
-    private static final Map<XpCategory, Long> cooldownEnd = new EnumMap<>(XpCategory.class);
+    // Generic tiers. For armour we just reuse these names (LEATHER/CHAINMAIL)
+    private enum Tier {
+        WOOD,
+        STONE,
+        COPPER,
+        IRON,
+        DIAMOND,
+        LEATHER,
+        CHAINMAIL
+    }
 
-    /** To only play sound once per cooldown completion. */
-    private static final Map<XpCategory, Boolean> soundPlayed = new EnumMap<>(XpCategory.class);
+    // One cooldown entry = one Skill + one Tier
+    private record SkillTier(Skill skill, Tier tier) {}
+
+    // When each skill+tier is ready again (system millis)
+    private static final Map<SkillTier, Long> cooldownEnd = new HashMap<>();
+
+    // To only play the "ready" sound once
+    private static final Map<SkillTier, Boolean> soundPlayed = new HashMap<>();
 
     @Override
     public void onInitializeClient() {
-        // This runs once when the client starts
         registerBlockBreakListener();
         registerTickListener();
         registerHudOverlay();
     }
 
-    /* ---------- BLOCK BREAK LISTENER ---------- */
+    /* ================== BLOCK BREAK LISTENER ================== */
 
     private void registerBlockBreakListener() {
         ClientPlayerBlockBreakEvents.AFTER.register(TutorialModClient::onClientBlockBreak);
@@ -52,33 +72,79 @@ public class TutorialModClient implements ClientModInitializer {
 
     private static void onClientBlockBreak(ClientWorld world, ClientPlayerEntity player, BlockPos pos, BlockState state) {
         MinecraftClient mc = MinecraftClient.getInstance();
-        if (mc.player != player) return; // Just sanity check
+        if (mc.player != player) return; // just sanity
 
         ItemStack held = player.getMainHandStack();
-        XpCategory category = detectCategory(held, state);
-        if (category == null) return;
+        SkillTier skillTier = detectSkillTier(held, state);
+        if (skillTier == null) return;
 
         long now = System.currentTimeMillis();
-        cooldownEnd.put(category, now + COOLDOWN_MS);
-        soundPlayed.put(category, false);
+
+        // Only start a new cooldown if there is none yet or it has expired.
+        Long existingEnd = cooldownEnd.get(skillTier);
+        if (existingEnd == null || existingEnd <= now) {
+            cooldownEnd.put(skillTier, now + COOLDOWN_MS);
+            soundPlayed.put(skillTier, false);
+        }
     }
 
-    /** Decide which XP timer this block break belongs to. */
-    private static XpCategory detectCategory(ItemStack held, BlockState state) {
-        // Axe + logs
+    /**
+     * Map a block break (held item + block) to a (Skill, Tier) pair.
+     * This is where we match your server's knowledge categories.
+     */
+    private static SkillTier detectSkillTier(ItemStack held, BlockState state) {
+        if (held.isEmpty()) return null;
+
+        Tier tier = getToolTier(held);
+        if (tier == null) return null;
+
+        // Forestry: logs + axe
         if (held.isIn(ItemTags.AXES) && state.isIn(BlockTags.LOGS)) {
-            return XpCategory.LOGS_AXE;
+            return new SkillTier(Skill.FORESTRY, tier);
         }
 
-        // Pickaxe + stone-ish stuff
+        // Mining: anything mineable with pickaxe (stone/ores/metal blocks etc.)
         if (held.isIn(ItemTags.PICKAXES) && state.isIn(BlockTags.PICKAXE_MINEABLE)) {
-            return XpCategory.STONE_PICKAXE;
+            return new SkillTier(Skill.MINING, tier);
         }
 
+        // Digging: shovel blocks (dirt, sand, gravel, etc.)
+        if (held.isIn(ItemTags.SHOVELS) && state.isIn(BlockTags.SHOVEL_MINEABLE)) {
+            return new SkillTier(Skill.DIGGING, tier);
+        }
+
+        // Farming: breaking crops while holding a hoe
+        if (held.isIn(ItemTags.HOES) && state.getBlock() instanceof CropBlock) {
+            return new SkillTier(Skill.FARMING, tier);
+        }
+
+        // You can later add melee/ranged combat here if you hook into attack events,
+        // or recipes for WEAPONSMITHING / TOOLSMITHING / ARMOURING.
+
+        return null; // Not a skill/tier we track with block breaks
+    }
+
+    /**
+     * Very simple way to read tier from item name.
+     * Works fine for vanilla tools/armour, can be refined later.
+     */
+    private static Tier getToolTier(ItemStack held) {
+        String id = held.getItem().toString().toLowerCase();
+
+        if (id.contains("wooden"))    return Tier.WOOD;
+        if (id.contains("stone"))     return Tier.STONE;
+        if (id.contains("copper"))    return Tier.COPPER;
+        if (id.contains("iron"))      return Tier.IRON;
+        if (id.contains("diamond"))   return Tier.DIAMOND;
+
+        if (id.contains("leather"))   return Tier.LEATHER;
+        if (id.contains("chainmail")) return Tier.CHAINMAIL;
+
+        // If nothing matches, we don't know the tier
         return null;
     }
 
-    /* ---------- TICK LISTENER ---------- */
+    /* ================== TICK LISTENER (SOUND) ================== */
 
     private void registerTickListener() {
         ClientTickEvents.END_CLIENT_TICK.register(client -> {
@@ -86,21 +152,21 @@ public class TutorialModClient implements ClientModInitializer {
 
             long now = System.currentTimeMillis();
 
-            for (XpCategory cat : XpCategory.values()) {
-                Long end = cooldownEnd.get(cat);
-                if (end == null) continue;
+            for (var entry : cooldownEnd.entrySet()) {
+                SkillTier key = entry.getKey();
+                long end = entry.getValue();
 
                 long remainingMs = end - now;
-                if (remainingMs <= 0 && !soundPlayed.getOrDefault(cat, false)) {
-                    // Cooldown finished -> Optional sound ONCE
+                if (remainingMs <= 0 && !soundPlayed.getOrDefault(key, false)) {
+                    // Cooldown finished → play "ready" sound once (optional)
                     client.player.playSound(SoundEvents.UI_BUTTON_CLICK.value(), 1.0f, 1.0f);
-                    soundPlayed.put(cat, true);
+                    soundPlayed.put(key, true);
                 }
             }
         });
     }
 
-    /* ---------- HUD OVERLAY ---------- */
+    /* ================== HUD OVERLAY ================== */
 
     private void registerHudOverlay() {
         HudRenderCallback.EVENT.register((DrawContext context, float tickDelta) -> {
@@ -112,33 +178,31 @@ public class TutorialModClient implements ClientModInitializer {
             int x = 10;
             int y = 10;
 
-            for (XpCategory cat : XpCategory.values()) {
-                Long end = cooldownEnd.get(cat);
-                if (end == null) continue;
-
+            for (var entry : cooldownEnd.entrySet()) {
+                SkillTier key = entry.getKey();
+                long end = entry.getValue();
                 long remainingMs = end - now;
 
                 String text;
                 int color;
+
                 if (remainingMs <= 0) {
-                    text = formatCategory(cat) + ": READY";
+                    text = formatSkillTier(key) + ": READY";
                     color = 0x00FF00; // green
                 } else {
-                    long seconds = (remainingMs + 999) / 1000;
-                    text = formatCategory(cat) + ": " + seconds + "s";
+                    long seconds = (remainingMs + 999) / 1000; // round up
+                    text = formatSkillTier(key) + ": " + seconds + "s";
                     color = 0xFFFFFF; // white
                 }
 
                 context.drawText(client.textRenderer, text, x, y, color, true);
-                y += 10; // move down for next line
+                y += 10;
             }
         });
     }
 
-    private static String formatCategory(XpCategory cat) {
-        return switch (cat) {
-            case LOGS_AXE -> "Logs (Axe)";
-            case STONE_PICKAXE -> "Stone (Pickaxe)";
-        };
+    private static String formatSkillTier(SkillTier st) {
+        // e.g. "FORESTRY (IRON)" – you can prettify this later
+        return st.skill().name() + " (" + st.tier().name() + ")";
     }
 }
