@@ -13,10 +13,13 @@ import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.item.ArmorItem;
 import net.minecraft.item.AxeItem;
 import net.minecraft.item.BowItem;
 import net.minecraft.item.CrossbowItem;
+import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
+import net.minecraft.item.Items;
 import net.minecraft.item.SwordItem;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
@@ -55,13 +58,19 @@ public class TutorialModClient implements ClientModInitializer {
 
     private static long tickCounter = 0L;
 
+    // Snapshot of last inventory state for crafting detection
+    private static ItemStack[] lastInventory = null;
+
     private enum Skill {
         MELEE_COMBAT,
         DIGGING,
         FORESTRY,
         FARMING,
         MINING,
-        RANGED_COMBAT
+        RANGED_COMBAT,
+        TOOLSMITHING,
+        WEAPONSMITHING,
+        ARMOURING
     }
 
     private enum Tier {
@@ -74,13 +83,19 @@ public class TutorialModClient implements ClientModInitializer {
         CHAINMAIL
     }
 
-    // Includes the icon stack used for HUD/toast
-    private record SkillKey(Skill skill, Tier tier, String toolGroup, ItemStack iconStack) {}
+    // Skill key for cooldowns & logic (NO icon here)
+    private record SkillKey(Skill skill, Tier tier, String toolGroup) {}
 
+    // Toast storage: which skill became ready when
     private record SkillToast(SkillKey key, long startTimeMs) {}
 
+    // Cooldown end time per skill key
     private static final Map<SkillKey, Long> cooldownEnd = new HashMap<>();
+    // Ensure we only play "ready" sound + toast once per cooldown
     private static final Map<SkillKey, Boolean> soundPlayed = new HashMap<>();
+    // Icon for each skill key
+    private static final Map<SkillKey, ItemStack> keyIcons = new HashMap<>();
+    // Active toast popups
     private static final List<SkillToast> activeToasts = new ArrayList<>();
 
     @Override
@@ -104,7 +119,7 @@ public class TutorialModClient implements ClientModInitializer {
         SkillKey key = detectSkillKeyFromBlock(held, state);
         if (key == null) return;
 
-        startCooldown(key);
+        startCooldown(key, held);
     }
 
     /* ================== TICK LOGIC ================== */
@@ -126,7 +141,7 @@ public class TutorialModClient implements ClientModInitializer {
                     client.player.playSound(SoundEvents.UI_BUTTON_CLICK.value(), 1.0f, 1.0f);
 
                     // Show custom toast popup
-                    showReadyToast(client, key);
+                    showReadyToast(key);
 
                     soundPlayed.put(key, true);
                 }
@@ -148,6 +163,9 @@ public class TutorialModClient implements ClientModInitializer {
 
             // Bow draw + release
             handleBowUsageTick(client);
+
+            // Crafting-based smithing detection
+            handleCraftingGains(client);
         });
     }
 
@@ -172,7 +190,8 @@ public class TutorialModClient implements ClientModInitializer {
         Entity target = ehr.getEntity();
         if (!(target instanceof LivingEntity)) return;
 
-        startCooldown(new SkillKey(Skill.MELEE_COMBAT, tier, null, held.copy()));
+        SkillKey key = new SkillKey(Skill.MELEE_COMBAT, tier, null);
+        startCooldown(key, held);
     }
 
     /* ================== CROSSBOW TWO-CLICK SYSTEM ================== */
@@ -186,7 +205,7 @@ public class TutorialModClient implements ClientModInitializer {
             return;
         }
 
-        // First click = charge
+        // First click = charge (NO cooldown here)
         if (!crossbowPrimed) {
             crossbowPrimed = true;
             return;
@@ -201,7 +220,8 @@ public class TutorialModClient implements ClientModInitializer {
 
         Tier tier = getToolTier(held);
         if (tier != null) {
-            startCooldown(new SkillKey(Skill.RANGED_COMBAT, tier, "crossbow", held.copy()));
+            SkillKey key = new SkillKey(Skill.RANGED_COMBAT, tier, "crossbow");
+            startCooldown(key, held);
         }
 
         crossbowPrimed = false;
@@ -246,19 +266,120 @@ public class TutorialModClient implements ClientModInitializer {
         LivingEntity target = getAimedLivingEntity(client, MAX_RANGED_DISTANCE, MAX_RANGED_ANGLE_DEGREES);
         if (target == null) return;
 
-        startCooldown(new SkillKey(Skill.RANGED_COMBAT, tier, "bow", held.copy()));
+        SkillKey key = new SkillKey(Skill.RANGED_COMBAT, tier, "bow");
+        startCooldown(key, held);
+    }
+
+    /* ================== CRAFTING → SMITHING DETECTION ================== */
+
+    /**
+     * Detects when the player actually RECEIVES an item (inventory count goes up)
+     * while a GUI is open, and if that item is a tool/weapon/armor, starts the appropriate smithing timer.
+     */
+    private static void handleCraftingGains(MinecraftClient client) {
+        if (client.player == null) return;
+
+        var inv = client.player.getInventory();
+        int size = inv.size(); // main + armor + offhand
+
+        // Initialize inventory snapshot
+        if (lastInventory == null || lastInventory.length != size) {
+            lastInventory = new ItemStack[size];
+            for (int i = 0; i < size; i++) {
+                lastInventory[i] = inv.getStack(i).copy();
+            }
+            return;
+        }
+
+        // Only consider gains while some GUI is open (inventory, crafting table, anvil, smithing table, etc.)
+        boolean inGui = client.currentScreen != null;
+        if (!inGui) {
+            // Just update snapshot and bail
+            for (int i = 0; i < size; i++) {
+                lastInventory[i] = inv.getStack(i).copy();
+            }
+            return;
+        }
+
+        // Look for any slot where count increased
+        for (int i = 0; i < size; i++) {
+            ItemStack oldStack = lastInventory[i];
+            ItemStack newStack = inv.getStack(i);
+
+            int oldCount = oldStack.isEmpty() ? 0 : oldStack.getCount();
+            int newCount = newStack.isEmpty() ? 0 : newStack.getCount();
+
+            if (newCount > oldCount) {
+                // Player gained items in this slot (could be craft result)
+                ItemStack gained = newStack.copy();
+
+                SkillKey smithKey = detectSmithingSkillFromItem(gained);
+                if (smithKey != null) {
+                    startCooldown(smithKey, gained);
+                }
+
+                // Only handle one gain per tick to avoid spam
+                break;
+            }
+        }
+
+        // Refresh snapshot
+        for (int i = 0; i < size; i++) {
+            lastInventory[i] = inv.getStack(i).copy();
+        }
+    }
+
+    /**
+     * Classify a crafted item into TOOLSMITHING / WEAPONSMITHING / ARMOURING based on what it is.
+     */
+    private static SkillKey detectSmithingSkillFromItem(ItemStack stack) {
+        if (stack.isEmpty()) return null;
+
+        Tier tier = getToolTier(stack);
+        if (tier == null) return null;
+
+        Item item = stack.getItem();
+
+        // Armour (helmet, chestplate, leggings, boots, etc.)
+        if (item instanceof ArmorItem) {
+            return new SkillKey(Skill.ARMOURING, tier, null);
+        }
+
+        // Weapons: swords, bows, crossbows, etc.
+        boolean isSwordLike = stack.isIn(ItemTags.SWORDS) || item instanceof SwordItem;
+        boolean isBowLike = item instanceof BowItem || item instanceof CrossbowItem;
+        if (isSwordLike || isBowLike) {
+            return new SkillKey(Skill.WEAPONSMITHING, tier, null);
+        }
+
+        // Tools: pickaxe, axe, shovel, hoe (could expand later)
+        boolean isTool =
+                stack.isIn(ItemTags.PICKAXES) ||
+                        stack.isIn(ItemTags.AXES) ||
+                        stack.isIn(ItemTags.SHOVELS) ||
+                        stack.isIn(ItemTags.HOES);
+
+        if (isTool) {
+            return new SkillKey(Skill.TOOLSMITHING, tier, null);
+        }
+
+        return null;
     }
 
     /* ================== COOLDOWNS ================== */
 
-    private static void startCooldown(SkillKey key) {
+    private static void startCooldown(SkillKey key, ItemStack iconSource) {
         long now = System.currentTimeMillis();
         Long existingEnd = cooldownEnd.get(key);
 
+        // Only start a new cooldown if there isn't one already active
         if (existingEnd == null || existingEnd <= now) {
             cooldownEnd.put(key, now + COOLDOWN_MS);
             soundPlayed.put(key, false);
         }
+
+        // Always update the icon to the latest tool state
+        keyIcons.put(key, iconSource.copy());
     }
 
     /* ================== BLOCK → SKILL ================== */
@@ -270,19 +391,19 @@ public class TutorialModClient implements ClientModInitializer {
         if (tier == null) return null;
 
         if (held.isIn(ItemTags.AXES) && state.isIn(BlockTags.LOGS)) {
-            return new SkillKey(Skill.FORESTRY, tier, null, held.copy());
+            return new SkillKey(Skill.FORESTRY, tier, null);
         }
 
         if (held.isIn(ItemTags.PICKAXES) && state.isIn(BlockTags.PICKAXE_MINEABLE)) {
-            return new SkillKey(Skill.MINING, tier, null, held.copy());
+            return new SkillKey(Skill.MINING, tier, null);
         }
 
         if (held.isIn(ItemTags.SHOVELS) && state.isIn(BlockTags.SHOVEL_MINEABLE)) {
-            return new SkillKey(Skill.DIGGING, tier, null, held.copy());
+            return new SkillKey(Skill.DIGGING, tier, null);
         }
 
         if (held.isIn(ItemTags.HOES) && state.getBlock() instanceof CropBlock) {
-            return new SkillKey(Skill.FARMING, tier, null, held.copy());
+            return new SkillKey(Skill.FARMING, tier, null);
         }
 
         return null;
@@ -345,8 +466,7 @@ public class TutorialModClient implements ClientModInitializer {
 
     /* ================== CUSTOM TOAST HANDLING ================== */
 
-    private static void showReadyToast(MinecraftClient client, SkillKey key) {
-        // Just add to our list; drawn in HUD callback
+    private static void showReadyToast(SkillKey key) {
         activeToasts.add(new SkillToast(key, System.currentTimeMillis()));
     }
 
@@ -374,7 +494,8 @@ public class TutorialModClient implements ClientModInitializer {
 
                 long seconds = (remainingMs + 999) / 1000;
 
-                context.drawItem(key.iconStack(), x, y);
+                ItemStack icon = keyIcons.getOrDefault(key, new ItemStack(Items.CLOCK));
+                context.drawItem(icon, x, y);
 
                 String text = seconds + "s";
                 context.drawText(client.textRenderer, text, x + iconSize + 3, y + 4, 0xFFFFFF, true);
@@ -400,23 +521,26 @@ public class TutorialModClient implements ClientModInitializer {
                     continue;
                 }
 
+                SkillKey key = toast.key();
+                ItemStack icon = keyIcons.getOrDefault(key, new ItemStack(Items.CLOCK));
+
                 int tx = baseX;
                 int ty = baseY + index * (toastHeight + 4);
 
                 // Simple background
                 context.fill(tx, ty, tx + toastWidth, ty + toastHeight, 0xCC000000); // semi-transparent black
 
-                // Border (optional)
+                // Border
                 context.fill(tx, ty, tx + toastWidth, ty + 1, 0xFFFFFFFF);
                 context.fill(tx, ty + toastHeight - 1, tx + toastWidth, ty + toastHeight, 0xFFFFFFFF);
                 context.fill(tx, ty, tx + 1, ty + toastHeight, 0xFFFFFFFF);
                 context.fill(tx + toastWidth - 1, ty, tx + toastWidth, ty + toastHeight, 0xFFFFFFFF);
 
                 // Tool icon
-                context.drawItem(toast.key().iconStack(), tx + 4, ty + 4);
+                context.drawItem(icon, tx + 4, ty + 4);
 
-                String skillName = toast.key().skill().name().replace("_", " ");
-                String tierName = toast.key().tier().name().toLowerCase();
+                String skillName = key.skill().name().replace("_", " ");
+                String tierName = key.tier().name().toLowerCase();
 
                 Text title = Text.literal(skillName + " READY");
                 Text subtitle = Text.literal("(" + tierName + ")");

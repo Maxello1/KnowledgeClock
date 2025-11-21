@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "id": "xptimer",
-  "version": "1.1.0",
+  "version": "1.1.1",
 
   "name": "XP Timer",
   "description": "Client-side XP cooldown timer for Spifftopia, made by Maxello.",
