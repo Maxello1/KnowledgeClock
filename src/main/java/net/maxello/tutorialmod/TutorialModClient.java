@@ -9,6 +9,7 @@ import net.minecraft.block.BlockState;
 import net.minecraft.block.CropBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
+import net.minecraft.client.gui.screen.ingame.HandledScreen;
 import net.minecraft.client.network.ClientPlayerEntity;
 import net.minecraft.client.world.ClientWorld;
 import net.minecraft.entity.Entity;
@@ -17,12 +18,15 @@ import net.minecraft.item.ArmorItem;
 import net.minecraft.item.AxeItem;
 import net.minecraft.item.BowItem;
 import net.minecraft.item.CrossbowItem;
+import net.minecraft.item.FishingRodItem;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.item.SwordItem;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
+import net.minecraft.screen.ScreenHandler;
+import net.minecraft.screen.ScreenHandlerType;
 import net.minecraft.sound.SoundEvents;
 import net.minecraft.text.Text;
 import net.minecraft.util.hit.EntityHitResult;
@@ -54,23 +58,25 @@ public class TutorialModClient implements ClientModInitializer {
     private static boolean wasUsingBow = false;
     private static long bowUseStartTick = 0L;
 
+    // Crossbow: simple two-click system (first click = charge, second click = fire)
     private static boolean crossbowPrimed = false;
 
     private static long tickCounter = 0L;
 
-    // Snapshot of last inventory state for crafting detection
+    // Snapshot of last inventory state for crafting & fishing detection
     private static ItemStack[] lastInventory = null;
 
     private enum Skill {
         MELEE_COMBAT,
         DIGGING,
         FORESTRY,
-        FARMING,
+        HUSBANDRY,
         MINING,
         RANGED_COMBAT,
         TOOLSMITHING,
         WEAPONSMITHING,
-        ARMOURING
+        ARMOURING,
+        FISHING
     }
 
     private enum Tier {
@@ -154,18 +160,18 @@ public class TutorialModClient implements ClientModInitializer {
             }
             lastAttackPressed = attackNow;
 
-            // Crossbow two-click
+            // Use key edge: used for crossbow two-click logic
             boolean useNow = client.options.useKey.isPressed();
             if (useNow && !lastUsePressed) {
                 handleUseKeyPressed(client);
             }
             lastUsePressed = useNow;
 
-            // Bow draw + release
+            // Bow draw + release (for bow shots)
             handleBowUsageTick(client);
 
-            // Crafting-based smithing detection
-            handleCraftingGains(client);
+            // Crafting + fishing detection via inventory gains
+            handleInventoryGains(client);
         });
     }
 
@@ -194,24 +200,33 @@ public class TutorialModClient implements ClientModInitializer {
         startCooldown(key, held);
     }
 
-    /* ================== CROSSBOW TWO-CLICK SYSTEM ================== */
+    /* ================== USE KEY (CROSSBOW TWO-CLICK, SIMPLE VERSION) ================== */
 
+    /**
+     * First right-click with crossbow = "start charging" (we just mark primed).
+     * Second right-click with crossbow while aiming at an entity = treat as shot & start timer.
+     *
+     * This is the older, simple behavior that worked well for you, with the tiny edge case
+     * where a re-charge after a shot can sometimes count. We're intentionally accepting that.
+     */
     private static void handleUseKeyPressed(MinecraftClient client) {
         if (client.player == null) return;
+
         ItemStack held = client.player.getMainHandStack();
 
+        // If we're not holding a crossbow, reset state and ignore
         if (!(held.getItem() instanceof CrossbowItem)) {
             crossbowPrimed = false;
             return;
         }
 
-        // First click = charge (NO cooldown here)
+        // First click with crossbow => "start charging", but no XP yet
         if (!crossbowPrimed) {
             crossbowPrimed = true;
             return;
         }
 
-        // Second click = shot (if aimed at something)
+        // Second click with crossbow => should be the actual shot
         LivingEntity target = getAimedLivingEntity(client, MAX_RANGED_DISTANCE, MAX_RANGED_ANGLE_DEGREES);
         if (target == null) {
             crossbowPrimed = false;
@@ -219,10 +234,10 @@ public class TutorialModClient implements ClientModInitializer {
         }
 
         Tier tier = getToolTier(held);
-        if (tier != null) {
-            SkillKey key = new SkillKey(Skill.RANGED_COMBAT, tier, "crossbow");
-            startCooldown(key, held);
-        }
+        if (tier == null) tier = Tier.WOOD;
+
+        SkillKey key = new SkillKey(Skill.RANGED_COMBAT, tier, "crossbow");
+        startCooldown(key, held);
 
         crossbowPrimed = false;
     }
@@ -270,89 +285,113 @@ public class TutorialModClient implements ClientModInitializer {
         startCooldown(key, held);
     }
 
-    /* ================== CRAFTING → SMITHING DETECTION ================== */
+    /* ================== INVENTORY GAINS → SMITHING + FISHING ================== */
 
-    /**
-     * Detects when the player actually RECEIVES an item (inventory count goes up)
-     * while a GUI is open, and if that item is a tool/weapon/armor, starts the appropriate smithing timer.
-     */
-    private static void handleCraftingGains(MinecraftClient client) {
+    private static void handleInventoryGains(MinecraftClient client) {
         if (client.player == null) return;
 
-        var inv = client.player.getInventory();
-        int size = inv.size(); // main + armor + offhand
+        try {
+            var inv = client.player.getInventory();
+            int size = inv.size(); // main + armor + offhand
 
-        // Initialize inventory snapshot
-        if (lastInventory == null || lastInventory.length != size) {
-            lastInventory = new ItemStack[size];
-            for (int i = 0; i < size; i++) {
-                lastInventory[i] = inv.getStack(i).copy();
-            }
-            return;
-        }
-
-        // Only consider gains while some GUI is open (inventory, crafting table, anvil, smithing table, etc.)
-        boolean inGui = client.currentScreen != null;
-        if (!inGui) {
-            // Just update snapshot and bail
-            for (int i = 0; i < size; i++) {
-                lastInventory[i] = inv.getStack(i).copy();
-            }
-            return;
-        }
-
-        // Look for any slot where count increased
-        for (int i = 0; i < size; i++) {
-            ItemStack oldStack = lastInventory[i];
-            ItemStack newStack = inv.getStack(i);
-
-            int oldCount = oldStack.isEmpty() ? 0 : oldStack.getCount();
-            int newCount = newStack.isEmpty() ? 0 : newStack.getCount();
-
-            if (newCount > oldCount) {
-                // Player gained items in this slot (could be craft result)
-                ItemStack gained = newStack.copy();
-
-                SkillKey smithKey = detectSmithingSkillFromItem(gained);
-                if (smithKey != null) {
-                    startCooldown(smithKey, gained);
+            // Initialize inventory snapshot
+            if (lastInventory == null || lastInventory.length != size) {
+                lastInventory = new ItemStack[size];
+                for (int i = 0; i < size; i++) {
+                    lastInventory[i] = inv.getStack(i).copy();
                 }
-
-                // Only handle one gain per tick to avoid spam
-                break;
+                return;
             }
-        }
 
-        // Refresh snapshot
-        for (int i = 0; i < size; i++) {
-            lastInventory[i] = inv.getStack(i).copy();
+            boolean inCraftingScreen = isCraftingOrSmithingScreen(client);
+
+            // Look for any slot where count increased
+            for (int i = 0; i < size; i++) {
+                ItemStack oldStack = lastInventory[i];
+                ItemStack newStack = inv.getStack(i);
+
+                int oldCount = oldStack.isEmpty() ? 0 : oldStack.getCount();
+                int newCount = newStack.isEmpty() ? 0 : newStack.getCount();
+
+                if (newCount > oldCount) {
+                    ItemStack gained = newStack.copy();
+
+                    if (inCraftingScreen) {
+                        // Only treat gains from crafting / smithing GUIs as smithing XP
+                        SkillKey smithKey = detectSmithingSkillFromItem(gained);
+                        if (smithKey != null) {
+                            startCooldown(smithKey, gained);
+                        }
+                    } else {
+                        // No crafting GUI → could be fishing
+                        SkillKey fishKey = detectFishingSkillFromGain(client, gained);
+                        if (fishKey != null) {
+                            startCooldown(fishKey, gained);
+                        }
+                    }
+
+                    // Only handle one gain per tick to avoid spam
+                    break;
+                }
+            }
+
+            // Refresh snapshot
+            for (int i = 0; i < size; i++) {
+                lastInventory[i] = inv.getStack(i).copy();
+            }
+        } catch (Throwable t) {
+            // Fail-safe: if *anything* goes wrong, reset snapshot so we don't crash the game
+            lastInventory = null;
         }
     }
 
     /**
-     * Classify a crafted item into TOOLSMITHING / WEAPONSMITHING / ARMOURING based on what it is.
+     * Returns true only for crafting / smithing-related containers,
+     * not for chests, barrels, etc.
+     * Wrapped in try/catch so any weird modded screen can't crash the client.
+     */
+    private static boolean isCraftingOrSmithingScreen(MinecraftClient client) {
+        try {
+            if (!(client.currentScreen instanceof HandledScreen<?> hs)) return false;
+
+            ScreenHandler handler = hs.getScreenHandler();
+            if (handler == null) return false;
+
+            ScreenHandlerType<?> type = handler.getType();
+            if (type == null) return false;
+
+            return type == ScreenHandlerType.CRAFTING
+                    || type == ScreenHandlerType.ANVIL
+                    || type == ScreenHandlerType.SMITHING
+                    || type == ScreenHandlerType.STONECUTTER;
+        } catch (Throwable t) {
+            // If anything goes weird (modded screen, mappings, etc.), just say "no crafting screen"
+            return false;
+        }
+    }
+
+    /**
+     * Classify a crafted item into TOOLSMITHING / WEAPONSMITHING / ARMOURING.
+     * IMPORTANT: tier is collapsed to WOOD so there is only ONE cooldown per smithing skill.
      */
     private static SkillKey detectSmithingSkillFromItem(ItemStack stack) {
         if (stack.isEmpty()) return null;
-
-        Tier tier = getToolTier(stack);
-        if (tier == null) return null;
 
         Item item = stack.getItem();
 
         // Armour (helmet, chestplate, leggings, boots, etc.)
         if (item instanceof ArmorItem) {
-            return new SkillKey(Skill.ARMOURING, tier, null);
+            return new SkillKey(Skill.ARMOURING, Tier.WOOD, null);
         }
 
         // Weapons: swords, bows, crossbows, etc.
         boolean isSwordLike = stack.isIn(ItemTags.SWORDS) || item instanceof SwordItem;
         boolean isBowLike = item instanceof BowItem || item instanceof CrossbowItem;
         if (isSwordLike || isBowLike) {
-            return new SkillKey(Skill.WEAPONSMITHING, tier, null);
+            return new SkillKey(Skill.WEAPONSMITHING, Tier.WOOD, null);
         }
 
-        // Tools: pickaxe, axe, shovel, hoe (could expand later)
+        // Tools: pickaxe, axe, shovel, hoe
         boolean isTool =
                 stack.isIn(ItemTags.PICKAXES) ||
                         stack.isIn(ItemTags.AXES) ||
@@ -360,10 +399,39 @@ public class TutorialModClient implements ClientModInitializer {
                         stack.isIn(ItemTags.HOES);
 
         if (isTool) {
-            return new SkillKey(Skill.TOOLSMITHING, tier, null);
+            return new SkillKey(Skill.TOOLSMITHING, Tier.WOOD, null);
         }
 
         return null;
+    }
+
+    /**
+     * Detect fishing XP: we only count it when:
+     * - No crafting/smithing GUI is open
+     * - Player is holding a fishing rod
+     * - Inventory gained a fish item
+     */
+    private static SkillKey detectFishingSkillFromGain(MinecraftClient client, ItemStack gained) {
+        if (client.player == null || gained.isEmpty()) return null;
+
+        Item main = client.player.getMainHandStack().getItem();
+        Item off = client.player.getOffHandStack().getItem();
+
+        boolean holdingRod = main instanceof FishingRodItem || off instanceof FishingRodItem;
+        if (!holdingRod) return null;
+
+        // Vanilla fish items + fish tag
+        boolean isFish =
+                gained.isIn(ItemTags.FISHES) ||
+                        gained.isOf(Items.COD) ||
+                        gained.isOf(Items.SALMON) ||
+                        gained.isOf(Items.TROPICAL_FISH) ||
+                        gained.isOf(Items.PUFFERFISH);
+
+        if (!isFish) return null;
+
+        // Tier doesn't matter for fishing → use WOOD as generic
+        return new SkillKey(Skill.FISHING, Tier.WOOD, null);
     }
 
     /* ================== COOLDOWNS ================== */
@@ -403,7 +471,7 @@ public class TutorialModClient implements ClientModInitializer {
         }
 
         if (held.isIn(ItemTags.HOES) && state.getBlock() instanceof CropBlock) {
-            return new SkillKey(Skill.FARMING, tier, null);
+            return new SkillKey(Skill.HUSBANDRY, tier, null);
         }
 
         return null;
@@ -495,6 +563,25 @@ public class TutorialModClient implements ClientModInitializer {
                 long seconds = (remainingMs + 999) / 1000;
 
                 ItemStack icon = keyIcons.getOrDefault(key, new ItemStack(Items.CLOCK));
+
+                boolean isSmithing =
+                        key.skill() == Skill.TOOLSMITHING ||
+                                key.skill() == Skill.WEAPONSMITHING ||
+                                key.skill() == Skill.ARMOURING;
+
+                // Crafting-table-ish background for smithing skills
+                if (isSmithing) {
+                    int bgPad = 2;
+                    int x1 = x - bgPad;
+                    int y1 = y - bgPad;
+                    int x2 = x + iconSize + bgPad;
+                    int y2 = y + iconSize + bgPad;
+                    // Dark brown base
+                    context.fill(x1, y1, x2, y2, 0xFF3B200A);
+                    // Lighter inner square
+                    context.fill(x1 + 2, y1 + 2, x2 - 2, y2 - 2, 0xFF8B5A2B);
+                }
+
                 context.drawItem(icon, x, y);
 
                 String text = seconds + "s";
@@ -535,6 +622,23 @@ public class TutorialModClient implements ClientModInitializer {
                 context.fill(tx, ty + toastHeight - 1, tx + toastWidth, ty + toastHeight, 0xFFFFFFFF);
                 context.fill(tx, ty, tx + 1, ty + toastHeight, 0xFFFFFFFF);
                 context.fill(tx + toastWidth - 1, ty, tx + toastWidth, ty + toastHeight, 0xFFFFFFFF);
+
+                boolean isSmithing =
+                        key.skill() == Skill.TOOLSMITHING ||
+                                key.skill() == Skill.WEAPONSMITHING ||
+                                key.skill() == Skill.ARMOURING;
+
+                // Small crafting-table-ish background behind icon on toast
+                if (isSmithing) {
+                    int ix = tx + 4;
+                    int iy = ty + 4;
+                    int x1 = ix - 1;
+                    int y1 = iy - 1;
+                    int x2 = ix + iconSize + 1;
+                    int y2 = iy + iconSize + 1;
+                    context.fill(x1, y1, x2, y2, 0xFF3B200A);
+                    context.fill(x1 + 2, y1 + 2, x2 - 2, y2 - 2, 0xFF8B5A2B);
+                }
 
                 // Tool icon
                 context.drawItem(icon, tx + 4, ty + 4);
