@@ -4,14 +4,15 @@ A Client Side fabric mod made to track the Spifftopia Knowledge timer so you alw
 
 Currently tracked Skills/Knowledges:
 
-Forestry
-Mining
-Fishing
-Ranged Combat
-Melee Combat
-Armorsmithing
-Toolsmithing
-Weaponsmithing
-Digging
-Husbandry
+- Forestry
+- Mining
+- Fishing
+- Ranged Combat
+- Melee Combat
+- Armorsmithing
+- Toolsmithing
+- Weaponsmithing
+- Digging
+- Husbandry
+
 More Skills/Knowledges will be added when more info about them is available.
