@@ -15,4 +15,4 @@ Currently tracked Skills/Knowledges:
 - Digging
 - Husbandry
 
-More Skills/Knowledges will be added when more info about them is available.
+More Skills/Knowledges will be added when more info about them is available and if the mod is allowed to be used on the Spifftopia Server (Awaiting reply from Spifftopia Staff).
