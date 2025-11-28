@@ -46,7 +46,7 @@ public class TutorialModClient implements ClientModInitializer {
     private static final long COOLDOWN_MS = 60_000L;
 
     // Bow / crossbow detection
-    private static final double MAX_RANGED_DISTANCE = 20.0D;
+    private static final double MAX_RANGED_DISTANCE = 50.0D;
     private static final double MAX_RANGED_ANGLE_DEGREES = 12.0D;
 
     // Toasts
