@@ -226,7 +226,7 @@ public class TutorialModClient implements ClientModInitializer {
         }
 
         // Second click with crossbow => should be the actual shot
-        LivingEntity target = getAimedLivingEntity(client, MAX_RANGED_DISTANCE, MAX_RANGED_ANGLE_DEGREES);
+        LivingEntity target = getAimedLivingEntity(client);
         if (target == null) {
             crossbowPrimed = false;
             return;
@@ -277,7 +277,7 @@ public class TutorialModClient implements ClientModInitializer {
         Tier tier = getToolTier(held);
         if (tier == null) return;
 
-        LivingEntity target = getAimedLivingEntity(client, MAX_RANGED_DISTANCE, MAX_RANGED_ANGLE_DEGREES);
+        LivingEntity target = getAimedLivingEntity(client);
         if (target == null) return;
 
         SkillKey key = new SkillKey(Skill.RANGED_COMBAT, tier, "bow");
@@ -497,16 +497,16 @@ public class TutorialModClient implements ClientModInitializer {
 
     /* ================== AIM-CONE ENTITY PICK ================== */
 
-    private static LivingEntity getAimedLivingEntity(MinecraftClient client, double maxDistance, double maxAngleDeg) {
+    private static LivingEntity getAimedLivingEntity(MinecraftClient client) {
         if (client.player == null || client.world == null) return null;
 
         Vec3d eyePos = client.player.getCameraPosVec(1.0f);
         Vec3d lookDir = client.player.getRotationVec(1.0f).normalize();
 
-        double maxAngleRad = Math.toRadians(maxAngleDeg);
+        double maxAngleRad = Math.toRadians(TutorialModClient.MAX_RANGED_ANGLE_DEGREES);
         double minDot = Math.cos(maxAngleRad);
 
-        Box searchBox = client.player.getBoundingBox().expand(maxDistance);
+        Box searchBox = client.player.getBoundingBox().expand(TutorialModClient.MAX_RANGED_DISTANCE);
         LivingEntity best = null;
         double bestDistance = Double.MAX_VALUE;
 
@@ -517,7 +517,7 @@ public class TutorialModClient implements ClientModInitializer {
             Vec3d toEntity = le.getBoundingBox().getCenter().subtract(eyePos);
 
             double dist = toEntity.length();
-            if (dist < 0.1 || dist > maxDistance) continue;
+            if (dist < 0.1 || dist > TutorialModClient.MAX_RANGED_DISTANCE) continue;
 
             Vec3d dirToEntity = toEntity.normalize();
             if (lookDir.dotProduct(dirToEntity) < minDot) continue;
