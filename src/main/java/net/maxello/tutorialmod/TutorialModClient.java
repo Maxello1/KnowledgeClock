@@ -205,9 +205,8 @@ public class TutorialModClient implements ClientModInitializer {
     /**
      * First right-click with crossbow = "start charging" (we just mark primed).
      * Second right-click with crossbow while aiming at an entity = treat as shot & start timer.
-     *
-     * This is the older, simple behavior that worked well for you, with the tiny edge case
-     * where a re-charge after a shot can sometimes count. We're intentionally accepting that.
+     * This is the older, simple behavior that worked well, with the tiny edge case
+     * where a re-charge after a shot can sometimes count. intentionally accepting that at the moment.
      */
     private static void handleUseKeyPressed(MinecraftClient client) {
         if (client.player == null) return;
