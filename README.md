@@ -1,18 +1,25 @@
-REQUIRES FABRIC API
-
-A Client Side fabric mod made to track the Spifftopia Knowledge timer so you always know how long you are locked out of gaining knowledge/xp for different tasks on Spifftopia. Mod is only relevant for players of Spifftopia to track their knowledge cooldown.
+A client-side Fabric mod designed to track individual Knowledge timers, ensuring you always know how long you are locked out of gaining experience or progression in specific skills. This mod is intended exclusively for use on a custom server that makes use of a Knowledge-based progression system. It has no functionality or purpose on standard Minecraft worlds.
 
 Currently tracked Skills/Knowledges:
 
 - Forestry
+
 - Mining
+
 - Fishing
+
 - Ranged Combat
+
 - Melee Combat
+
 - Armorsmithing
+
 - Toolsmithing
+
 - Weaponsmithing
+
 - Digging
+
 - Husbandry
 
-More Skills/Knowledges will be added when more info about them is available and if the mod is allowed to be used on the Spifftopia Server (Awaiting reply from Spifftopia Staff).
+More skills and knowledge categories may be added as additional information becomes available.
