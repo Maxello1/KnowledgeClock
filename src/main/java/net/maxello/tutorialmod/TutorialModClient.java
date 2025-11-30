@@ -4,7 +4,6 @@ import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.fabric.api.event.client.player.ClientPlayerBlockBreakEvents;
-
 import net.minecraft.block.BlockState;
 import net.minecraft.block.CropBlock;
 import net.minecraft.client.MinecraftClient;
@@ -33,7 +32,6 @@ import net.minecraft.util.hit.EntityHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Vec3d;
-
 import java.util.HashMap;
 import java.util.Map;
 import java.util.List;
@@ -44,25 +42,18 @@ public class TutorialModClient implements ClientModInitializer {
 
     // 60 seconds per skill/tool
     private static final long COOLDOWN_MS = 60_000L;
-
     // Bow / crossbow detection
     private static final double MAX_RANGED_DISTANCE = 50.0D;
     private static final double MAX_RANGED_ANGLE_DEGREES = 12.0D;
-
     // Toasts
     private static final long TOAST_DURATION_MS = 2500L;
-
     private static boolean lastAttackPressed = false;
     private static boolean lastUsePressed = false;
-
     private static boolean wasUsingBow = false;
     private static long bowUseStartTick = 0L;
-
     // Crossbow: simple two-click system (first click = charge, second click = fire)
     private static boolean crossbowPrimed = false;
-
     private static long tickCounter = 0L;
-
     // Snapshot of last inventory state for crafting & fishing detection
     private static ItemStack[] lastInventory = null;
 
